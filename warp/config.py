@@ -280,6 +280,8 @@ enable_mathdx_solver: bool = True
 
 Controls all cuSolverDx-backed ops: :func:`tile_cholesky <warp._src.lang.tile_cholesky>`
 (and its adjoint), :func:`tile_cholesky_solve <warp._src.lang.tile_cholesky_solve>`,
+:func:`tile_lu <warp._src.lang.tile_lu>` (and its adjoint),
+:func:`tile_lu_solve <warp._src.lang.tile_lu_solve>`,
 :func:`tile_lower_solve <warp._src.lang.tile_lower_solve>`, and
 :func:`tile_upper_solve <warp._src.lang.tile_upper_solve>`.
 

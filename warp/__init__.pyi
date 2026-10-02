@@ -10988,6 +10988,107 @@ def tile_cholesky_solve_inplace(
         fill_mode: ``"lower"`` or ``"upper"``. Must be a compile-time constant."""
     ...
 
+def tile_lu(A: Tile[Float, tuple[int, int]]) -> tuple[Tile[Float, tuple[int, int]], Tile[int32, tuple[int]]]:
+    """Compute the LU factorization of a square matrix ``A`` with partial pivoting.
+
+    Returns the factors packed into a single tile, as LAPACK ``getrf``: the strictly
+    lower triangle holds ``L`` (whose unit diagonal is not stored) and the upper
+    triangle holds ``U``. The pivot tile records that row ``i`` was interchanged with
+    row ``piv[i] - 1``, applied in order ``i = 0, ..., M - 1``, so that ``P^T A = LU``.
+    The pivots are 1-based, as returned by cuSolverDx and LAPACK.
+
+    Backward propagation computes gradients with respect to ``A`` through the packed
+    factors, holding the pivots fixed.
+
+    Supported datatypes are:
+        * float32
+        * float64
+
+    Args:
+        A: A square, non-singular matrix.
+
+    Returns:
+        A tuple ``(LU, piv)`` of the packed factors and the 1-based int32 pivot tile."""
+    ...
+
+def tile_lu_inplace(A: Tile[Float, tuple[int, int]]) -> Tile[int32, tuple[int]]:
+    """Compute the LU factorization of a square matrix ``A`` with partial pivoting inplace.
+
+    ``A`` is replaced by the packed factors described in :func:`tile_lu`.
+
+    Note: This inplace variant does not support automatic differentiation (adjoint computation),
+    but offers improved performance and uses half the shared memory compared to the standard version.
+
+    Supported datatypes are:
+        * float32
+        * float64
+
+    Args:
+        A: A square, non-singular matrix.
+
+    Returns:
+        The 1-based int32 pivot tile."""
+    ...
+
+def tile_lu_solve(
+    LU: Tile[Float, tuple[int, int]],
+    piv: Tile[int32, tuple[int]],
+    y: Tile[Float, tuple[int]],
+    transpose: bool | _builtins.bool = False,
+) -> Tile[Float, tuple[int]]:
+    """Solve for ``x`` in ``Ax = y`` given the LU factorization of ``A``.
+
+    ``LU`` and ``piv`` are the packed factors and 1-based pivots returned by :func:`tile_lu`
+    or :func:`tile_lu_inplace`. When ``transpose=True``, solves ``A^T x = y`` instead,
+    using the same factors.
+
+    The ``transpose`` parameter must be a compile-time constant.
+
+    Note that computing the adjoint is not yet supported.
+
+    Supported datatypes are:
+        * float32
+        * float64
+
+    Args:
+        LU: A square tile of packed LU factors of ``A``.
+        piv: A 1D int32 tile of 1-based pivots.
+        y: A 1D or 2D tile of length ``M``.
+        transpose: Whether to solve ``A^T x = y``. Must be a compile-time constant.
+
+    Returns:
+        A tile of the same shape as ``y`` such that ``Ax = y`` (or ``A^T x = y``)."""
+    ...
+
+def tile_lu_solve_inplace(
+    LU: Tile[Float, tuple[int, int]],
+    piv: Tile[int32, tuple[int]],
+    y: Tile[Float, tuple[int]],
+    transpose: bool | _builtins.bool = False,
+) -> None:
+    """Solve for ``x`` in ``Ax = y`` by overwriting ``y`` with ``x``, given the LU factorization of ``A``.
+
+    ``LU`` and ``piv`` are the packed factors and 1-based pivots returned by :func:`tile_lu`
+    or :func:`tile_lu_inplace`. When ``transpose=True``, solves ``A^T x = y`` instead,
+    using the same factors.
+
+    The ``transpose`` parameter must be a compile-time constant.
+
+    Note: This inplace variant does not support automatic differentiation (adjoint computation),
+    but avoids allocating shared memory for the output ``x`` by reusing ``y``'s memory.
+
+    Supported datatypes are:
+        * float32
+        * float64
+
+    Args:
+        LU: A square tile of packed LU factors of ``A``.
+        piv: A 1D int32 tile of 1-based pivots.
+        y: A 1D or 2D tile with compatible shape that gets overwritten by ``x`` where ``Ax = y``
+            (or ``A^T x = y``).
+        transpose: Whether to solve ``A^T x = y``. Must be a compile-time constant."""
+    ...
+
 def tile_lower_solve(L: Tile[Float, tuple[int, int]], y: Tile[Float, tuple[int]]) -> Tile[Float, tuple[int]]:
     """Solve for ``z`` in ``Lz = y``, where ``L`` is a lower triangular matrix.
 

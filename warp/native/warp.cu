@@ -5219,6 +5219,7 @@ bool wp_cuda_compile_solver(
     int arrangement_A,
     int arrangement_B,
     int fill_mode,
+    int transpose_mode,
     int num_threads
 )
 {
@@ -5270,9 +5271,17 @@ bool wp_cuda_compile_solver(
     CHECK_CUSOLVER(cusolverdxSetOperatorInt64s(
         h, cusolverdxOperatorType::CUSOLVERDX_OPERATOR_ARRANGEMENT, arrangement.size(), arrangement.data()
     ));
-    CHECK_CUSOLVER(cusolverdxSetOperatorInt64(
-        h, cusolverdxOperatorType::CUSOLVERDX_OPERATOR_FILL_MODE, (cusolverdxFillMode)fill_mode
-    ));
+    // LU functions reject the fill mode operator
+    if (fill_mode >= 0) {
+        CHECK_CUSOLVER(cusolverdxSetOperatorInt64(
+            h, cusolverdxOperatorType::CUSOLVERDX_OPERATOR_FILL_MODE, (cusolverdxFillMode)fill_mode
+        ));
+    }
+    if (transpose_mode >= 0) {
+        CHECK_CUSOLVER(cusolverdxSetOperatorInt64(
+            h, cusolverdxOperatorType::CUSOLVERDX_OPERATOR_TRANSPOSE_MODE, (cusolverdxTransposeMode)transpose_mode
+        ));
+    }
     CHECK_CUSOLVER(
         cusolverdxSetOperatorInt64(h, cusolverdxOperatorType::CUSOLVERDX_OPERATOR_SM, (long long)(arch * 10))
     );

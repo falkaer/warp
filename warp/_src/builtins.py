@@ -18567,7 +18567,15 @@ add_builtin(
 )
 
 
-cusolver_function_map = {"getrf": 0, "getrf_no_pivot": 1, "potrf": 2, "potrs": 3, "trsm": 4}
+cusolver_function_map = {
+    "getrf_no_pivot": 0,
+    "getrs_no_pivot": 1,
+    "potrf": 2,
+    "potrs": 3,
+    "trsm": 4,
+    "getrf": 5,
+    "getrs": 6,
+}
 
 cusolver_type_map = {float32: ("wp::float32", 5), float64: ("wp::float64", 6)}
 
@@ -18576,6 +18584,8 @@ cusolver_fill_mode_map = {"upper": 0, "lower": 1}
 cusolver_side_map = {"-": -1, "left": 0, "right": 1}
 
 cusolver_diag_map = {"-": -1, "unit": 0, "nounit": 1}
+
+cusolver_transpose_map = {"-": -1, "non_transposed": 0, "transposed": 1}
 
 
 ##
@@ -19063,6 +19073,518 @@ add_builtin(
         L: A square triangular Cholesky factor of ``A``.
         y: A 1D or 2D tile of length ``M`` that gets overwritten by ``x`` where ``Ax = y``.
         fill_mode: ``"lower"`` or ``"upper"``. Must be a compile-time constant.""",
+    group="Tile Primitives",
+    export=False,
+    is_differentiable=False,
+)
+
+
+##
+## LU
+##
+def _tile_lu_generic_value_func(inplace: bool, arg_types, arg_values):
+    if arg_types is None:
+        if inplace:
+            return tile(dtype=int32, shape=tuple[int])
+        return (tile(dtype=Float, shape=tuple[int, int]), tile(dtype=int32, shape=tuple[int]))
+
+    if len(arg_types) != 1:
+        raise TypeError(f"tile_lu() takes exactly 1 positional argument but {len(arg_types)} were given")
+
+    a = arg_types["A"]
+
+    if not is_tile(a):
+        raise TypeError(f"tile_lu() argument must be a tile, got {a!r}")
+
+    if len(a.shape) != 2:
+        raise ValueError("tile_lu() argument must be a 2D tile")
+
+    if a.shape[0] != a.shape[1]:
+        raise ValueError("tile_lu() argument must be square")
+
+    piv = tile(dtype=int32, shape=(a.shape[0],), storage="shared")
+
+    if inplace:
+        return piv
+    return (tile(dtype=a.dtype, shape=a.shape, layout=a.layout, strides=a.strides, storage="shared"), piv)
+
+
+def tile_lu_generic_value_func(arg_types, arg_values):
+    return _tile_lu_generic_value_func(False, arg_types, arg_values)
+
+
+def tile_lu_inplace_generic_value_func(arg_types, arg_values):
+    return _tile_lu_generic_value_func(True, arg_types, arg_values)
+
+
+def _tile_lu_generic_lto_dispatch_func(
+    inplace: bool,
+    arg_types: Mapping[str, type],
+    return_type: Any,
+    return_values: List[Var],
+    arg_values: Mapping[str, Var],
+    options: Mapping[str, Any],
+    builder: warp._src.context.ModuleBuilder,
+):
+    a = arg_values["A"]
+    # force source tile to shared memory
+    a.type.storage = "shared"
+
+    if a.type.dtype not in cusolver_type_map.keys():
+        raise TypeError("tile_lu() argument must be a tile of float32 or float64 entries")
+
+    M, N = a.type.shape
+
+    if inplace:
+        if len(return_values) != 1:
+            raise TypeError("tile_lu_inplace() returns one output")
+        piv = return_values[0]
+    else:
+        if len(return_values) != 2:
+            raise TypeError("tile_lu() returns two outputs")
+        out, piv = return_values
+
+        # We already ensured a is square in tile_lu_generic_value_func()
+        if out.type.shape[0] != M or out.type.shape[1] != M:
+            raise ValueError("tile_lu() output tile must be square")
+
+    if piv.type.shape[0] != M:
+        raise ValueError("tile_lu() pivot tile must have as many entries as the number of rows in 'A'")
+
+    arch = options["output_arch"]
+
+    if (
+        arch is None
+        or not warp._src.context.runtime.core.wp_is_mathdx_enabled()
+        or not options.get("enable_mathdx_solver", True)
+    ):
+        # CPU/no-MathDx/disabled dispatch -- falls into the cooperative scalar
+        # branch via wp_is_null_func<Fwd>.
+        if inplace:
+            return ((0, a, piv), [], [], 0)
+        return ((0, 0, 0, a), [], [], 0)
+    else:
+        solver = "getrf"
+        solver_enum = cusolver_function_map[solver]
+        side_enum = cusolver_side_map["-"]
+        diag_enum = cusolver_diag_map["-"]
+        dtype, precision_enum = cusolver_type_map[a.type.dtype]
+        num_threads = options["block_dim"]
+        parameter_list = f"({dtype}*, int*, int*)"
+        req_smem_bytes = a.type.size * type_size_in_bytes(a.type.dtype) + M * type_size_in_bytes(int32)
+        if not inplace:
+            req_smem_bytes += a.type.size * type_size_in_bytes(a.type.dtype)
+            if options["enable_backward"]:
+                req_smem_bytes += 2 * M * M * type_size_in_bytes(a.type.dtype)
+
+        # generate the forward LTO
+        if M != N:
+            raise RuntimeError(f"tile_lu() input must be square after validation, got shape ({M}, {N})")
+        lto_symbol, lto_code_data = warp._src.build.build_lto_solver(
+            M,
+            N,
+            1,
+            solver,
+            solver_enum,
+            side_enum,
+            diag_enum,
+            a.type.layout if inplace else out.type.layout,
+            a.type.layout if inplace else out.type.layout,
+            -1,
+            arch,
+            precision_enum,
+            num_threads,
+            parameter_list,
+            builder,
+            smem_estimate_bytes=req_smem_bytes,
+        )
+
+        if inplace:
+            var = Var(lto_symbol, str, False, True, False)
+            return ((var, a, piv), [], [lto_code_data], 0)
+
+        # for out-of-place LU, build backward LTOs for adjoint
+        # we need two trsm solves for the adjoint, one with L^T and one with U
+        lto_list = [lto_code_data]
+        if options["enable_backward"]:
+
+            def tile_flip_layout(layout):
+                if layout == "rowmajor":
+                    return "colmajor"
+                elif layout == "colmajor":
+                    return "rowmajor"
+                else:
+                    raise ValueError(f"unexpected layout {layout!r}")
+
+            # LTO to solve L^T @ X = Y, reading the packed factors with flipped layout
+            # as an upper triangular matrix with unit diagonal
+            fun_bkwd_trsm_l, lto_bkwd_trsm_l = warp._src.build.build_lto_solver(
+                M,
+                M,
+                1,
+                "trsm",
+                cusolver_function_map["trsm"],
+                cusolver_side_map["left"],
+                cusolver_diag_map["unit"],
+                tile_flip_layout(out.type.layout),
+                "rowmajor",
+                cusolver_fill_mode_map["upper"],
+                arch,
+                precision_enum,
+                num_threads,
+                f"({dtype}*, {dtype}*)",
+                builder,
+                smem_estimate_bytes=req_smem_bytes,
+            )
+            # LTO to solve U @ X = Y, reading the upper triangle of the packed factors
+            fun_bkwd_trsm_u, lto_bkwd_trsm_u = warp._src.build.build_lto_solver(
+                M,
+                M,
+                1,
+                "trsm",
+                cusolver_function_map["trsm"],
+                cusolver_side_map["left"],
+                cusolver_diag_map["nounit"],
+                out.type.layout,
+                "rowmajor",
+                cusolver_fill_mode_map["upper"],
+                arch,
+                precision_enum,
+                num_threads,
+                f"({dtype}*, {dtype}*)",
+                builder,
+                smem_estimate_bytes=req_smem_bytes,
+            )
+            lto_list.extend([lto_bkwd_trsm_l, lto_bkwd_trsm_u])
+        else:
+            fun_bkwd_trsm_l = 0
+            fun_bkwd_trsm_u = 0
+
+        var_fwd = Var(lto_symbol, str, False, True, False)
+        if options["enable_backward"]:
+            var_trsm_l = Var(fun_bkwd_trsm_l, str, False, True, False)
+            var_trsm_u = Var(fun_bkwd_trsm_u, str, False, True, False)
+        else:
+            var_trsm_l = 0
+            var_trsm_u = 0
+        return ((var_fwd, var_trsm_l, var_trsm_u, a), [], lto_list, 0)
+
+
+def tile_lu_generic_lto_dispatch_func(*args, **kwargs):
+    return _tile_lu_generic_lto_dispatch_func(False, *args, **kwargs)
+
+
+def tile_lu_inplace_generic_lto_dispatch_func(*args, **kwargs):
+    return _tile_lu_generic_lto_dispatch_func(True, *args, **kwargs)
+
+
+add_builtin(
+    "tile_lu",
+    input_types={"A": tile(dtype=Float, shape=tuple[int, int])},
+    value_func=tile_lu_generic_value_func,
+    lto_dispatch_func=tile_lu_generic_lto_dispatch_func,
+    variadic=True,
+    doc="""Compute the LU factorization of a square matrix ``A`` with partial pivoting.
+
+    Returns the factors packed into a single tile, as LAPACK ``getrf``: the strictly
+    lower triangle holds ``L`` (whose unit diagonal is not stored) and the upper
+    triangle holds ``U``. The pivot tile records that row ``i`` was interchanged with
+    row ``piv[i] - 1``, applied in order ``i = 0, ..., M - 1``, so that ``P^T A = LU``.
+    The pivots are 1-based, as returned by cuSolverDx and LAPACK.
+
+    Backward propagation computes gradients with respect to ``A`` through the packed
+    factors, holding the pivots fixed.
+
+    Supported datatypes are:
+        * float32
+        * float64
+
+    Args:
+        A: A square, non-singular matrix.
+
+    Returns:
+        A tuple ``(LU, piv)`` of the packed factors and the 1-based int32 pivot tile.""",
+    group="Tile Primitives",
+    export=False,
+    is_differentiable=True,
+)
+
+
+add_builtin(
+    "tile_lu_inplace",
+    input_types={"A": tile(dtype=Float, shape=tuple[int, int])},
+    value_func=tile_lu_inplace_generic_value_func,
+    lto_dispatch_func=tile_lu_inplace_generic_lto_dispatch_func,
+    variadic=True,
+    doc="""Compute the LU factorization of a square matrix ``A`` with partial pivoting inplace.
+
+    ``A`` is replaced by the packed factors described in :func:`tile_lu`.
+
+    Note: This inplace variant does not support automatic differentiation (adjoint computation),
+    but offers improved performance and uses half the shared memory compared to the standard version.
+
+    Supported datatypes are:
+        * float32
+        * float64
+
+    Args:
+        A: A square, non-singular matrix.
+
+    Returns:
+        The 1-based int32 pivot tile.""",
+    group="Tile Primitives",
+    export=False,
+    is_differentiable=False,
+)
+
+
+def _tile_lu_solve_extract_transpose(arg_values, func_name="tile_lu_solve"):
+    """Extract transpose from arg_values, returning a bool."""
+    transpose_var = arg_values.get("transpose")
+    if transpose_var is None:
+        return False
+    if not hasattr(transpose_var, "constant") or transpose_var.constant is None:
+        raise ValueError(f"{func_name}() transpose must be a compile-time constant")
+    return builtins.bool(transpose_var.constant)
+
+
+def _tile_lu_solve_generic_value_func(inplace: bool, arg_types, arg_values):
+    if arg_types is None:
+        if inplace:
+            return None
+        return tile(dtype=Float, shape=tuple[int])
+
+    if len(arg_types) > 4:
+        raise TypeError(
+            f"tile_lu_solve() takes 3 positional arguments and 1 optional argument but {len(arg_types)} were given"
+        )
+
+    lu = arg_types["LU"]
+    piv = arg_types["piv"]
+    y = arg_types["y"]
+
+    if not is_tile(lu):
+        raise TypeError(f"tile_lu_solve() 'LU' argument must be a tile, got {lu!r}")
+
+    if not is_tile(piv):
+        raise TypeError(f"tile_lu_solve() 'piv' argument must be a tile, got {piv!r}")
+
+    if not is_tile(y):
+        raise TypeError(f"tile_lu_solve() 'y' argument must be a tile, got {y!r}")
+
+    if not types_equal(lu.dtype, y.dtype):
+        raise TypeError(f"tile_lu_solve() arguments must have the same dtype, got {lu.dtype} and {y.dtype}")
+
+    if not types_equal(piv.dtype, int32):
+        raise TypeError(f"tile_lu_solve() 'piv' argument must be a tile of int32 entries, got {piv.dtype}")
+
+    if lu.shape[0] != lu.shape[1]:
+        raise ValueError("tile_lu_solve() 'LU' argument must be square")
+
+    if len(piv.shape) != 1 or piv.shape[0] != lu.shape[0]:
+        raise ValueError(
+            f"tile_lu_solve() 'piv' argument must be a 1D tile with as many elements as the number of rows in 'LU', "
+            f"got shape {piv.shape} for 'piv' and {lu.shape[0]} rows in 'LU'"
+        )
+
+    if len(y.shape) > 2 or len(y.shape) < 1:
+        raise TypeError("tile_lu_solve() 'y' argument must be a 1D or 2D tile")
+
+    if y.shape[0] != lu.shape[0]:
+        raise ValueError(
+            f"tile_lu_solve() 'y' argument must have the same number of elements as the number of rows in 'LU', "
+            f"got {y.shape[0]} elements in 'y' and {lu.shape[0]} rows in 'LU'"
+        )
+
+    if inplace:
+        return None
+    return tile(dtype=lu.dtype, shape=y.shape, layout=y.layout, strides=y.strides, storage="shared")
+
+
+def tile_lu_solve_generic_value_func(arg_types, arg_values):
+    return _tile_lu_solve_generic_value_func(False, arg_types, arg_values)
+
+
+def tile_lu_solve_inplace_generic_value_func(arg_types, arg_values):
+    return _tile_lu_solve_generic_value_func(True, arg_types, arg_values)
+
+
+def _tile_lu_solve_generic_lto_dispatch_func(
+    inplace: bool,
+    arg_types: Mapping[str, type],
+    return_type: Any,
+    return_values: List[Var],
+    arg_values: Mapping[str, Var],
+    options: Mapping[str, Any],
+    builder: warp._src.context.ModuleBuilder,
+):
+    transpose = _tile_lu_solve_extract_transpose(arg_values)
+    LU = arg_values["LU"]
+    piv = arg_values["piv"]
+    y = arg_values["y"]
+    # force the storage type of the input variables to shared memory
+    LU.type.storage = "shared"
+    piv.type.storage = "shared"
+    y.type.storage = "shared"
+
+    M, N = LU.type.shape
+
+    if not inplace:
+        if len(return_values) != 1:
+            raise TypeError(f"tile_lu_solve() must return exactly one value, got {len(return_values)}")
+
+        x = return_values[0]
+
+        if len(x.type.shape) > 2 or len(x.type.shape) < 1:
+            raise TypeError(f"tile_lu_solve() output vector must be 1D or 2D, got {len(x.type.shape)}-D")
+
+        if x.type.shape[0] != M:
+            raise ValueError(
+                "tile_lu_solve() output vector must have same number of elements as the number of rows in 'LU' "
+                f"got {x.type.shape[0]} elements in output and {M} rows in 'LU'"
+            )
+
+        if len(x.type.shape) > 1 and y.type.shape[1] != x.type.shape[1]:
+            raise ValueError(
+                "tile_lu_solve() output vector must have the same number of columns as 'y' "
+                f"got {x.type.shape[1]} columns in output and {y.type.shape[1]} columns in 'y'"
+            )
+
+    if any(T not in cusolver_type_map.keys() for T in [y.type.dtype, LU.type.dtype]):
+        raise TypeError("tile_lu_solve() arguments must be tiles of float64 or float32")
+
+    arch = options["output_arch"]
+
+    if (
+        arch is None
+        or not warp._src.context.runtime.core.wp_is_mathdx_enabled()
+        or not options.get("enable_mathdx_solver", True)
+    ):
+        # CPU/no-MathDx/disabled dispatch -- falls into the cooperative scalar
+        # branch via wp_is_null_func<Fwd>.
+        return ((0, LU, piv, y) if inplace else (0, LU, piv, y, x), [transpose], [], 0)
+    else:
+        NRHS = y.type.shape[1] if len(y.type.shape) > 1 else 1
+        solver = "getrs"
+        solver_enum = cusolver_function_map[solver]
+        side_enum = cusolver_side_map["-"]
+        diag_enum = cusolver_diag_map["-"]
+        transpose_enum = cusolver_transpose_map["transposed" if transpose else "non_transposed"]
+        dtype, precision_enum = cusolver_type_map[LU.type.dtype]
+        num_threads = options["block_dim"]
+        parameter_list = f"({dtype}*, int*, {dtype}*)"
+        req_smem_bytes = (y.type.size + LU.type.size) * type_size_in_bytes(LU.type.dtype) + M * type_size_in_bytes(
+            int32
+        )
+        if not inplace:
+            req_smem_bytes += x.type.size * type_size_in_bytes(LU.type.dtype)
+
+        # generate the LTO
+        lto_symbol, lto_code_data = warp._src.build.build_lto_solver(
+            M,
+            N,
+            NRHS,
+            solver,
+            solver_enum,
+            side_enum,
+            diag_enum,
+            LU.type.layout,
+            y.type.layout,
+            -1,
+            arch,
+            precision_enum,
+            num_threads,
+            parameter_list,
+            builder,
+            smem_estimate_bytes=req_smem_bytes,
+            transpose_mode=transpose_enum,
+        )
+
+        var = Var(lto_symbol, str, False, True, False)
+        return ((var, LU, piv, y) if inplace else (var, LU, piv, y, x), [transpose], [lto_code_data], 0)
+
+
+def tile_lu_solve_generic_lto_dispatch_func(*args, **kwargs):
+    return _tile_lu_solve_generic_lto_dispatch_func(False, *args, **kwargs)
+
+
+def tile_lu_solve_inplace_generic_lto_dispatch_func(*args, **kwargs):
+    return _tile_lu_solve_generic_lto_dispatch_func(True, *args, **kwargs)
+
+
+add_builtin(
+    "tile_lu_solve",
+    input_types={
+        "LU": tile(dtype=Float, shape=tuple[int, int]),
+        "piv": tile(dtype=int32, shape=tuple[int]),
+        "y": tile(dtype=Float, shape=tuple[int]),
+        "transpose": builtins.bool,
+    },
+    defaults={"transpose": False},
+    value_func=tile_lu_solve_generic_value_func,
+    lto_dispatch_func=tile_lu_solve_generic_lto_dispatch_func,
+    variadic=True,
+    doc="""Solve for ``x`` in ``Ax = y`` given the LU factorization of ``A``.
+
+    ``LU`` and ``piv`` are the packed factors and 1-based pivots returned by :func:`tile_lu`
+    or :func:`tile_lu_inplace`. When ``transpose=True``, solves ``A^T x = y`` instead,
+    using the same factors.
+
+    The ``transpose`` parameter must be a compile-time constant.
+
+    Note that computing the adjoint is not yet supported.
+
+    Supported datatypes are:
+        * float32
+        * float64
+
+    Args:
+        LU: A square tile of packed LU factors of ``A``.
+        piv: A 1D int32 tile of 1-based pivots.
+        y: A 1D or 2D tile of length ``M``.
+        transpose: Whether to solve ``A^T x = y``. Must be a compile-time constant.
+
+    Returns:
+        A tile of the same shape as ``y`` such that ``Ax = y`` (or ``A^T x = y``).""",
+    group="Tile Primitives",
+    export=False,
+    is_differentiable=False,
+)
+
+
+add_builtin(
+    "tile_lu_solve_inplace",
+    input_types={
+        "LU": tile(dtype=Float, shape=tuple[int, int]),
+        "piv": tile(dtype=int32, shape=tuple[int]),
+        "y": tile(dtype=Float, shape=tuple[int]),
+        "transpose": builtins.bool,
+    },
+    defaults={"transpose": False},
+    value_func=tile_lu_solve_inplace_generic_value_func,
+    lto_dispatch_func=tile_lu_solve_inplace_generic_lto_dispatch_func,
+    variadic=True,
+    doc="""Solve for ``x`` in ``Ax = y`` by overwriting ``y`` with ``x``, given the LU factorization of ``A``.
+
+    ``LU`` and ``piv`` are the packed factors and 1-based pivots returned by :func:`tile_lu`
+    or :func:`tile_lu_inplace`. When ``transpose=True``, solves ``A^T x = y`` instead,
+    using the same factors.
+
+    The ``transpose`` parameter must be a compile-time constant.
+
+    Note: This inplace variant does not support automatic differentiation (adjoint computation),
+    but avoids allocating shared memory for the output ``x`` by reusing ``y``'s memory.
+
+    Supported datatypes are:
+        * float32
+        * float64
+
+    Args:
+        LU: A square tile of packed LU factors of ``A``.
+        piv: A 1D int32 tile of 1-based pivots.
+        y: A 1D or 2D tile with compatible shape that gets overwritten by ``x`` where ``Ax = y``
+            (or ``A^T x = y``).
+        transpose: Whether to solve ``A^T x = y``. Must be a compile-time constant.""",
     group="Tile Primitives",
     export=False,
     is_differentiable=False,

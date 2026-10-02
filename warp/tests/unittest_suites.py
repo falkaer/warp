@@ -286,6 +286,8 @@ def default_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader)
     from warp.tests.tile.test_tile_load_indexed import TestTileLoadIndexed
     from warp.tests.tile.test_tile_load_vectorized import TestTileLoadVectorized
     from warp.tests.tile.test_tile_low_precision_stack import TestTileLowPrecisionStack
+    from warp.tests.tile.test_tile_lu import TestTileLU
+    from warp.tests.tile.test_tile_lu_no_mathdx import TestTileLUNoMathDx
     from warp.tests.tile.test_tile_matmul import TestTileMatmul
     from warp.tests.tile.test_tile_matmul_no_mathdx import TestTileMatmulNoMathDx
     from warp.tests.tile.test_tile_matmul_strides import TestTileMatmulStrides
@@ -475,6 +477,8 @@ def default_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader)
         TestTileLoadIndexed,
         TestTileLoadVectorized,
         TestTileLowPrecisionStack,
+        TestTileLU,
+        TestTileLUNoMathDx,
         TestTileMatmul,
         TestTileMatmulNoMathDx,
         TestTileMatmulStrides,
@@ -746,6 +750,8 @@ def debug_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader):
     from warp.tests.tile.test_tile_load_indexed import TestTileLoadIndexed
     from warp.tests.tile.test_tile_load_vectorized import TestTileLoadVectorized
     from warp.tests.tile.test_tile_low_precision_stack import TestTileLowPrecisionStack
+    from warp.tests.tile.test_tile_lu import TestTileLU
+    from warp.tests.tile.test_tile_lu_no_mathdx import TestTileLUNoMathDx
     from warp.tests.tile.test_tile_matmul import TestTileMatmul
     from warp.tests.tile.test_tile_matmul_no_mathdx import TestTileMatmulNoMathDx
     from warp.tests.tile.test_tile_matmul_strides import TestTileMatmulStrides
@@ -959,6 +965,7 @@ def debug_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader):
         TestVerifyLibraryVersion,
         TestVersion,
         TestTileCholeskyNoMathDx,
+        TestTileLUNoMathDx,
         TestTileEmpty,
         TestTileFuncArg,
         TestTileFusedOps,
@@ -976,6 +983,7 @@ def debug_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader):
         TestOptionResolution,
         TestVecScalarOps,
         TestTileCholesky,
+        TestTileLU,
         TestTileMatmul,
     ]
 

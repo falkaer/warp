@@ -886,6 +886,7 @@ WP_API bool wp_cuda_compile_solver(
     int arrangement_A,
     int arrangement_B,
     int fill_mode,
+    int transpose_mode,
     int num_threads
 );
 

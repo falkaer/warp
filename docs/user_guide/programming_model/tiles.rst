@@ -276,6 +276,7 @@ and reuse shared storage aggressively:
 
 * Use the in-place forms, which do not support automatic differentiation:
   :func:`tile_cholesky_inplace <warp._src.lang.tile_cholesky_inplace>`,
+  :func:`tile_lu_inplace <warp._src.lang.tile_lu_inplace>`,
   :func:`tile_lower_solve_inplace <warp._src.lang.tile_lower_solve_inplace>`, and
   :func:`tile_upper_solve_inplace <warp._src.lang.tile_upper_solve_inplace>`.
 * Pass an existing tile as the output of
@@ -690,6 +691,10 @@ Linear Algebra
 * :func:`tile_cholesky_inplace <warp._src.lang.tile_cholesky_inplace>`
 * :func:`tile_cholesky_solve <warp._src.lang.tile_cholesky_solve>`
 * :func:`tile_cholesky_solve_inplace <warp._src.lang.tile_cholesky_solve_inplace>`
+* :func:`tile_lu <warp._src.lang.tile_lu>`
+* :func:`tile_lu_inplace <warp._src.lang.tile_lu_inplace>`
+* :func:`tile_lu_solve <warp._src.lang.tile_lu_solve>`
+* :func:`tile_lu_solve_inplace <warp._src.lang.tile_lu_solve_inplace>`
 * :func:`tile_lower_solve <warp._src.lang.tile_lower_solve>`
 * :func:`tile_lower_solve_inplace <warp._src.lang.tile_lower_solve_inplace>`
 * :func:`tile_upper_solve <warp._src.lang.tile_upper_solve>`

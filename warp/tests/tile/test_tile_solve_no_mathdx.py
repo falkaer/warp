@@ -6,7 +6,8 @@
 Setting ``enable_mathdx_solver=False`` at module scope routes
 ``tile_cholesky_solve``, ``tile_lower_solve``, and ``tile_upper_solve`` (and
 their inplace variants) through the cooperative scalar substitution
-primitives in ``tile_solve.h`` on GPU and cooperative CPU blocks,
+primitives in ``tile_solve.h``, and ``tile_lu_solve`` (and its inplace
+variant) through those in ``tile_lu.h``, on GPU and cooperative CPU blocks,
 exercising the path that runs whenever Warp is built without libmathdx or
 when a user disables the option per-module.
 """
@@ -139,6 +140,96 @@ def tile_cholesky_solve_inplace_mat_kernel(gL: wp.array2d[wp.float64], gy: wp.ar
     wp.tile_store(gy, y)
 
 
+# -----------------------------------------------------------------------------
+# tile_lu_solve  (PLU x = y or (PLU)^T x = y, given LU and pivots) -- exercises
+# the row interchanges and both substitutions composed.
+# -----------------------------------------------------------------------------
+
+
+@wp.kernel(enable_backward=False)
+def tile_lu_solve_vec_kernel(
+    gLU: wp.array2d[wp.float64], gP: wp.array1d[wp.int32], gy: wp.array1d[wp.float64], gx: wp.array1d[wp.float64]
+):
+    LU = wp.tile_load(gLU, shape=(N, N))
+    piv = wp.tile_load(gP, shape=N)
+    y = wp.tile_load(gy, shape=N)
+    x = wp.tile_lu_solve(LU, piv, y)
+    wp.tile_store(gx, x)
+
+
+@wp.kernel(enable_backward=False)
+def tile_lu_solve_transpose_vec_kernel(
+    gLU: wp.array2d[wp.float64], gP: wp.array1d[wp.int32], gy: wp.array1d[wp.float64], gx: wp.array1d[wp.float64]
+):
+    LU = wp.tile_load(gLU, shape=(N, N))
+    piv = wp.tile_load(gP, shape=N)
+    y = wp.tile_load(gy, shape=N)
+    x = wp.tile_lu_solve(LU, piv, y, transpose=True)
+    wp.tile_store(gx, x)
+
+
+@wp.kernel(enable_backward=False)
+def tile_lu_solve_mat_kernel(
+    gLU: wp.array2d[wp.float64], gP: wp.array1d[wp.int32], gy: wp.array2d[wp.float64], gx: wp.array2d[wp.float64]
+):
+    LU = wp.tile_load(gLU, shape=(N, N))
+    piv = wp.tile_load(gP, shape=N)
+    y = wp.tile_load(gy, shape=(N, M_RHS))
+    x = wp.tile_lu_solve(LU, piv, y)
+    wp.tile_store(gx, x)
+
+
+@wp.kernel(enable_backward=False)
+def tile_lu_solve_transpose_mat_kernel(
+    gLU: wp.array2d[wp.float64], gP: wp.array1d[wp.int32], gy: wp.array2d[wp.float64], gx: wp.array2d[wp.float64]
+):
+    LU = wp.tile_load(gLU, shape=(N, N))
+    piv = wp.tile_load(gP, shape=N)
+    y = wp.tile_load(gy, shape=(N, M_RHS))
+    x = wp.tile_lu_solve(LU, piv, y, transpose=True)
+    wp.tile_store(gx, x)
+
+
+@wp.kernel(enable_backward=False)
+def tile_lu_solve_inplace_vec_kernel(gLU: wp.array2d[wp.float64], gP: wp.array1d[wp.int32], gy: wp.array1d[wp.float64]):
+    LU = wp.tile_load(gLU, shape=(N, N))
+    piv = wp.tile_load(gP, shape=N)
+    y = wp.tile_load(gy, shape=N)
+    wp.tile_lu_solve_inplace(LU, piv, y)
+    wp.tile_store(gy, y)
+
+
+@wp.kernel(enable_backward=False)
+def tile_lu_solve_transpose_inplace_vec_kernel(
+    gLU: wp.array2d[wp.float64], gP: wp.array1d[wp.int32], gy: wp.array1d[wp.float64]
+):
+    LU = wp.tile_load(gLU, shape=(N, N))
+    piv = wp.tile_load(gP, shape=N)
+    y = wp.tile_load(gy, shape=N)
+    wp.tile_lu_solve_inplace(LU, piv, y, transpose=True)
+    wp.tile_store(gy, y)
+
+
+@wp.kernel(enable_backward=False)
+def tile_lu_solve_inplace_mat_kernel(gLU: wp.array2d[wp.float64], gP: wp.array1d[wp.int32], gy: wp.array2d[wp.float64]):
+    LU = wp.tile_load(gLU, shape=(N, N))
+    piv = wp.tile_load(gP, shape=N)
+    y = wp.tile_load(gy, shape=(N, M_RHS))
+    wp.tile_lu_solve_inplace(LU, piv, y)
+    wp.tile_store(gy, y)
+
+
+@wp.kernel(enable_backward=False)
+def tile_lu_solve_transpose_inplace_mat_kernel(
+    gLU: wp.array2d[wp.float64], gP: wp.array1d[wp.int32], gy: wp.array2d[wp.float64]
+):
+    LU = wp.tile_load(gLU, shape=(N, N))
+    piv = wp.tile_load(gP, shape=N)
+    y = wp.tile_load(gy, shape=(N, M_RHS))
+    wp.tile_lu_solve_inplace(LU, piv, y, transpose=True)
+    wp.tile_store(gy, y)
+
+
 @wp.kernel
 def tile_lower_solve_backward_vec_kernel(
     gL: wp.array2d[wp.float64], gy: wp.array1d[wp.float64], gz: wp.array1d[wp.float64]
@@ -198,6 +289,21 @@ def _spd_lower_factor(n, seed=0):
     A = rng.standard_normal((n, n))
     A = A @ A.T + n * np.eye(n)
     return np.linalg.cholesky(A)  # lower
+
+
+def _lu_factor(n, seed=0):
+    """Return a general matrix A, its packed LU factors and 1-based pivots (P^T A = LU, as LAPACK getrf)."""
+    rng = np.random.default_rng(seed)
+    A = rng.standard_normal((n, n))
+    LU = A.copy()
+    piv = np.zeros(n, dtype=np.int32)
+    for j in range(n):
+        p = j + int(np.argmax(np.abs(LU[j:, j])))
+        piv[j] = p + 1
+        LU[[j, p]] = LU[[p, j]]
+        LU[j + 1 :, j] /= LU[j, j]
+        LU[j + 1 :, j + 1 :] -= np.outer(LU[j + 1 :, j], LU[j, j + 1 :])
+    return A, LU, piv
 
 
 def _make_arr(arr_np, dtype, device):
@@ -531,6 +637,66 @@ def test_cholesky_solve_inplace_matrix(test, device):
     assert_np_equal(y.numpy(), x_ref, tol=1e-10)
 
 
+def test_lu_solve_vector(test, device):
+    A_np, LU_np, P_np = _lu_factor(N, seed=13)
+    y_np = np.arange(1.0, N + 1.0)
+
+    LU = _make_arr(LU_np, wp.float64, device)
+    P = wp.array(P_np, dtype=wp.int32, device=device)
+    y = _make_arr(y_np, wp.float64, device)
+
+    for kernel, A_ref in ((tile_lu_solve_vec_kernel, A_np), (tile_lu_solve_transpose_vec_kernel, A_np.T)):
+        x = wp.zeros(N, dtype=wp.float64, device=device)
+        wp.launch_tiled(kernel, dim=[1], inputs=[LU, P, y, x], block_dim=TILE_DIM, device=device)
+        assert_np_equal(x.numpy(), np.linalg.solve(A_ref, y_np), tol=1e-10)
+
+
+def test_lu_solve_matrix(test, device):
+    A_np, LU_np, P_np = _lu_factor(N, seed=14)
+    y_np = np.arange(1.0, N * M_RHS + 1.0).reshape(N, M_RHS)
+
+    LU = _make_arr(LU_np, wp.float64, device)
+    P = wp.array(P_np, dtype=wp.int32, device=device)
+    y = _make_arr(y_np, wp.float64, device)
+
+    for kernel, A_ref in ((tile_lu_solve_mat_kernel, A_np), (tile_lu_solve_transpose_mat_kernel, A_np.T)):
+        x = wp.zeros((N, M_RHS), dtype=wp.float64, device=device)
+        wp.launch_tiled(kernel, dim=[1], inputs=[LU, P, y, x], block_dim=TILE_DIM, device=device)
+        assert_np_equal(x.numpy(), np.linalg.solve(A_ref, y_np), tol=1e-10)
+
+
+def test_lu_solve_inplace_vector(test, device):
+    A_np, LU_np, P_np = _lu_factor(N, seed=15)
+    y_np = np.arange(1.0, N + 1.0)
+
+    LU = _make_arr(LU_np, wp.float64, device)
+    P = wp.array(P_np, dtype=wp.int32, device=device)
+
+    for kernel, A_ref in (
+        (tile_lu_solve_inplace_vec_kernel, A_np),
+        (tile_lu_solve_transpose_inplace_vec_kernel, A_np.T),
+    ):
+        y = _make_arr(y_np, wp.float64, device)
+        wp.launch_tiled(kernel, dim=[1], inputs=[LU, P, y], block_dim=TILE_DIM, device=device)
+        assert_np_equal(y.numpy(), np.linalg.solve(A_ref, y_np), tol=1e-10)
+
+
+def test_lu_solve_inplace_matrix(test, device):
+    A_np, LU_np, P_np = _lu_factor(N, seed=16)
+    y_np = np.arange(1.0, N * M_RHS + 1.0).reshape(N, M_RHS)
+
+    LU = _make_arr(LU_np, wp.float64, device)
+    P = wp.array(P_np, dtype=wp.int32, device=device)
+
+    for kernel, A_ref in (
+        (tile_lu_solve_inplace_mat_kernel, A_np),
+        (tile_lu_solve_transpose_inplace_mat_kernel, A_np.T),
+    ):
+        y = _make_arr(y_np, wp.float64, device)
+        wp.launch_tiled(kernel, dim=[1], inputs=[LU, P, y], block_dim=TILE_DIM, device=device)
+        assert_np_equal(y.numpy(), np.linalg.solve(A_ref, y_np), tol=1e-10)
+
+
 # -----------------------------------------------------------------------------
 # block_dim == 1 smoke (GPU codegen for single-thread-block must compile and
 # produce correct results -- the cooperative scalar path's thread-strided loops
@@ -566,6 +732,17 @@ def tile_cholesky_solve_mat_isolated_kernel(
     wp.tile_store(gx, x)
 
 
+@wp.kernel(enable_backward=False, grid_stride=False, module="unique", module_options={"enable_mathdx_solver": False})
+def tile_lu_solve_mat_isolated_kernel(
+    gLU: wp.array2d[wp.float64], gP: wp.array1d[wp.int32], gy: wp.array2d[wp.float64], gx: wp.array2d[wp.float64]
+):
+    LU = wp.tile_load(gLU, shape=(N, N))
+    piv = wp.tile_load(gP, shape=N)
+    y = wp.tile_load(gy, shape=(N, M_RHS))
+    x = wp.tile_lu_solve(LU, piv, y)
+    wp.tile_store(gx, x)
+
+
 def test_lower_solve_block_dim_1(test, device):
     L_np = _spd_lower_factor(N, seed=30)
     y_np = np.arange(1.0, N + 1.0)
@@ -590,6 +767,20 @@ def test_cholesky_solve_matrix_block_dim_1(test, device):
     x = wp.zeros((N, M_RHS), dtype=wp.float64, device=device)
 
     wp.launch_tiled(tile_cholesky_solve_mat_isolated_kernel, dim=[1], inputs=[L, y, x], block_dim=1, device=device)
+    assert_np_equal(x.numpy(), x_ref, tol=1e-10)
+
+
+def test_lu_solve_matrix_block_dim_1(test, device):
+    A_np, LU_np, P_np = _lu_factor(N, seed=32)
+    y_np = np.arange(1.0, N * M_RHS + 1.0).reshape(N, M_RHS)
+    x_ref = np.linalg.solve(A_np, y_np)
+
+    LU = _make_arr(LU_np, wp.float64, device)
+    P = wp.array(P_np, dtype=wp.int32, device=device)
+    y = _make_arr(y_np, wp.float64, device)
+    x = wp.zeros((N, M_RHS), dtype=wp.float64, device=device)
+
+    wp.launch_tiled(tile_lu_solve_mat_isolated_kernel, dim=[1], inputs=[LU, P, y, x], block_dim=1, device=device)
     assert_np_equal(x.numpy(), x_ref, tol=1e-10)
 
 
@@ -622,8 +813,13 @@ solve_tests = [
     ("test_cholesky_solve_matrix", test_cholesky_solve_matrix),
     ("test_cholesky_solve_inplace_vector", test_cholesky_solve_inplace_vector),
     ("test_cholesky_solve_inplace_matrix", test_cholesky_solve_inplace_matrix),
+    ("test_lu_solve_vector", test_lu_solve_vector),
+    ("test_lu_solve_matrix", test_lu_solve_matrix),
+    ("test_lu_solve_inplace_vector", test_lu_solve_inplace_vector),
+    ("test_lu_solve_inplace_matrix", test_lu_solve_inplace_matrix),
     ("test_lower_solve_block_dim_1", test_lower_solve_block_dim_1),
     ("test_cholesky_solve_matrix_block_dim_1", test_cholesky_solve_matrix_block_dim_1),
+    ("test_lu_solve_matrix_block_dim_1", test_lu_solve_matrix_block_dim_1),
 ]
 
 for name, func in solve_tests:
