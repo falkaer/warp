@@ -140,6 +140,20 @@ CUresult cuLaunchKernel_f(
     void** kernelParams,
     void** extra
 );
+CUresult cuLaunchCooperativeKernel_f(
+    CUfunction f,
+    unsigned int gridDimX,
+    unsigned int gridDimY,
+    unsigned int gridDimZ,
+    unsigned int blockDimX,
+    unsigned int blockDimY,
+    unsigned int blockDimZ,
+    unsigned int sharedMemBytes,
+    CUstream hStream,
+    void** kernelParams
+);
+CUresult
+cuOccupancyMaxActiveBlocksPerMultiprocessor_f(int* numBlocks, CUfunction func, int blockSize, size_t dynamicSMemSize);
 CUresult cuOccupancyMaxPotentialBlockSize_f(
     int* minGridSize,
     int* blockSize,

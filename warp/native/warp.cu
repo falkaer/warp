@@ -5585,6 +5585,28 @@ int wp_cuda_get_max_cluster_dim(void* context, void* kernel, int block_dim, int 
     return max_cluster_dim;
 }
 
+int wp_cuda_get_max_cooperative_blocks(void* context, void* kernel, int block_dim, int dynamic_smem_bytes)
+{
+    if (!kernel || !context)
+        return 0;
+
+    ContextGuard guard(context);
+
+    // A cooperative launch is accepted when every block can be resident at once,
+    // i.e. up to the occupancy limit per SM times the number of SMs.
+    int blocks_per_sm = 0;
+    if (!check_cu(cuOccupancyMaxActiveBlocksPerMultiprocessor_f(
+            &blocks_per_sm, (CUfunction)kernel, block_dim, (size_t)dynamic_smem_bytes
+        )))
+        return 0;
+
+    ContextInfo* context_info = get_context_info(static_cast<CUcontext>(context));
+    if (!context_info || !context_info->device_info)
+        return 0;
+
+    return blocks_per_sm * context_info->device_info->sm_count;
+}
+
 void* wp_cuda_get_kernel(void* context, void* module, const char* name)
 {
     ContextGuard guard(context);
@@ -5607,6 +5629,7 @@ size_t wp_cuda_launch_kernel(
     int block_dim,
     int grid_stride,
     int cluster_dim,
+    int cooperative,
     int shared_memory_bytes,
     void** args,
     void* stream,
@@ -5614,6 +5637,14 @@ size_t wp_cuda_launch_kernel(
 )
 {
     ContextGuard guard(context);
+
+    if (cooperative && cluster_dim > 1) {
+        wp::set_error_string(
+            "Warp CUDA error: cooperative kernel launches do not support thread block clusters (got cluster_dim=%d)",
+            cluster_dim
+        );
+        return CUDA_ERROR_INVALID_VALUE;
+    }
 
     if (block_dim <= 0) {
 #if defined(_DEBUG)
@@ -5718,13 +5749,29 @@ size_t wp_cuda_launch_kernel(
     // of cluster_dim, so an empty clustered launch (e.g. a recorded lean launch resized via
     // set_dim(0)) would otherwise be rejected by CUDA.
     CUresult res = CUDA_SUCCESS;
-    if (dim > 0)
-        res = cuLaunchKernel_f(
-            (CUfunction)kernel, grid_x, grid_y, grid_z, block_dim, 1, 1, shared_memory_bytes,
-            static_cast<CUstream>(stream), args, 0
-        );
+    if (dim > 0) {
+        if (cooperative)
+            // Every block of a cooperative launch is resident at once, so blocks may
+            // synchronize with each other; the driver rejects grids that cannot be.
+            res = cuLaunchCooperativeKernel_f(
+                (CUfunction)kernel, grid_x, grid_y, grid_z, block_dim, 1, 1, shared_memory_bytes,
+                static_cast<CUstream>(stream), args
+            );
+        else
+            res = cuLaunchKernel_f(
+                (CUfunction)kernel, grid_x, grid_y, grid_z, block_dim, 1, 1, shared_memory_bytes,
+                static_cast<CUstream>(stream), args, 0
+            );
+    }
 
-    check_cu(res);
+    if (!check_cu(res) && res == CUDA_ERROR_COOPERATIVE_LAUNCH_TOO_LARGE) {
+        wp::set_error_string(
+            "Warp CUDA error: cooperative kernel launch of %u blocks exceeds the %d blocks that can be resident on "
+            "the device at block_dim=%d; size the launch with wp.get_cuda_max_cooperative_blocks()",
+            grid_x * grid_y * grid_z,
+            wp_cuda_get_max_cooperative_blocks(context, kernel, block_dim, shared_memory_bytes), block_dim
+        );
+    }
 
     end_cuda_range(WP_TIMING_KERNEL, stream);
 
@@ -5755,7 +5802,7 @@ size_t wp_cuda_launch_kernel(
 
             apic_record_kernel_launch(
                 state, apic_info->kernel_key, apic_info->module_hash, apic_info->is_forward, shape, ndim, launch_size,
-                max_blocks, block_dim, grid_stride, cluster_dim, shared_memory_bytes, apic_info->params,
+                max_blocks, block_dim, grid_stride, cluster_dim, cooperative, shared_memory_bytes, apic_info->params,
                 apic_info->num_params, apic_info->adj_params, apic_info->relocs, apic_info->num_relocs,
                 apic_info->value_data, apic_info->value_data_size
             );

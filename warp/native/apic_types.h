@@ -187,7 +187,8 @@ struct APICLaunchRecord {
     int32_t grid_stride;  // 1 = grid-stride loop kernel, 0 = lean 3D kernel
     uint8_t is_forward;  // 1 for forward pass, 0 for backward
     uint8_t cluster_dim;  // 1D CTA cluster size, or 0 for older records
-    uint8_t _pad1[2];
+    uint8_t cooperative;  // 1 for a cooperative launch, 0 otherwise (and for older records)
+    uint8_t _pad1;
 
     // Variable data sizes
     uint16_t kernel_key_len;  // Length of kernel_key string

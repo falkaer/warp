@@ -14321,6 +14321,24 @@ add_builtin(
     is_differentiable=False,
 )
 
+add_builtin(
+    "grid_sync",
+    input_types={},
+    group="Utility",
+    doc="""Synchronize all threads of all blocks in the launch grid.
+
+    Every thread of the grid must call this function, and none returns until all have
+    arrived; writes to global memory made before the call are visible to every thread
+    after it. This is the equivalent of CUDA's ``cooperative_groups::this_grid().sync()``.
+
+    Only kernels declared with ``@wp.kernel(cooperative=True)`` may call this function,
+    because a grid barrier requires every block to be resident on the device at once.
+    Size the launch with :func:`warp.get_cuda_max_cooperative_blocks`. Cooperative
+    kernels are supported on CUDA devices only.""",
+    export=False,
+    is_differentiable=False,
+)
+
 
 def copy_value_func(arg_types: Mapping[str, type], arg_values: Mapping[str, Any]):
     a = arg_types["a"]

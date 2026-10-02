@@ -904,6 +904,7 @@ WP_API size_t wp_cuda_launch_kernel(
     int block_dim,
     int grid_stride,
     int cluster_dim,
+    int cooperative,
     int shared_memory_bytes,
     void** args,
     void* stream,
@@ -929,6 +930,10 @@ WP_API bool wp_cuda_set_kernel_cluster_attrs(void* kernel, int cx, int cy, int c
 // at the given block_dim and dynamic shared memory configuration. Returns
 // 1 if the device does not support clusters or on driver error.
 WP_API int wp_cuda_get_max_cluster_dim(void* context, void* kernel, int block_dim, int dynamic_smem_bytes);
+// Query the maximum number of blocks of *kernel* that can be resident on the
+// device at once at the given block_dim and dynamic shared memory, i.e. the
+// largest grid a cooperative launch accepts. Returns 0 on driver error.
+WP_API int wp_cuda_get_max_cooperative_blocks(void* context, void* kernel, int block_dim, int dynamic_smem_bytes);
 WP_API bool wp_cuda_get_suggested_block_size(
     void* context, void* kernel, int shared_memory_bytes, int* block_size_out, int* min_grid_size_out
 );

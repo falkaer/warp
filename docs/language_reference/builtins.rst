@@ -385,6 +385,7 @@ Utility
    breakpoint
    cast
    expect_near
+   grid_sync
    len
    lerp
    print

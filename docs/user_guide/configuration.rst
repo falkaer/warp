@@ -300,6 +300,48 @@ shared memory, cluster barriers, and cluster rank queries — requires native CU
 code. See :ref:`thread-block-clusters` in the C++/CUDA workflows guide for a
 worked distributed-shared-memory example.
 
+.. _kernel-cooperative:
+
+CUDA Cooperative Launches
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A kernel declared with ``cooperative=True`` is launched as a CUDA cooperative
+launch, in which every block of the grid is resident on the device at the same
+time. Its threads can then synchronize across blocks with :func:`warp.grid_sync`,
+which waits until all threads of the grid have arrived and makes their earlier
+global-memory writes visible to each other. A computation that would otherwise
+need one kernel launch per dependent step, such as the levels of a reduction or
+a scan, can run in a single launch:
+
+.. code-block:: python
+
+    @wp.kernel(cooperative=True, grid_stride=False)
+    def tree_sum(data: wp.array[int], n: int, levels: int):
+        i = wp.tid()
+        stride = int(1)
+        for _level in range(levels):
+            if i % (2 * stride) == 0 and i + stride < n:
+                data[i] = data[i] + data[i + stride]
+            wp.grid_sync()
+            stride = stride * 2
+
+
+    block_dim = 64
+    num_blocks = wp.get_cuda_max_cooperative_blocks(tree_sum, block_dim=block_dim)
+    n = num_blocks * block_dim
+    data = wp.ones(n, dtype=int)
+    wp.launch(tree_sum, dim=n, inputs=[data, n, 32], block_dim=block_dim)
+
+The number of blocks a cooperative launch accepts is limited by how many fit on
+the device at once, which depends on the kernel's register and shared-memory use
+and on ``block_dim``; :func:`warp.get_cuda_max_cooperative_blocks` returns it,
+and a larger launch fails. Every thread of the grid must call
+:func:`warp.grid_sync` the same number of times, so cooperative kernels require
+``grid_stride=False`` and cannot use ``cluster_dim``. Calling
+:func:`warp.grid_sync` from a kernel that is not cooperative, directly or
+through a :func:`@wp.func <warp.func>`, is a compile-time error. Cooperative
+kernels are supported on CUDA devices only.
+
 Function Settings
 -----------------
 

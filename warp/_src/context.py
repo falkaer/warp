@@ -1145,6 +1145,7 @@ class KernelHooks:
         forward_smem_bytes=0,
         backward_smem_bytes=0,
         cluster_dim=1,
+        cooperative=False,
         det_launch_meta: DeterministicMeta | None = None,
         forward_smem_shortfall: str | None = None,
         backward_smem_shortfall: str | None = None,
@@ -1166,6 +1167,10 @@ class KernelHooks:
         # the attribute, otherwise 1. Resolved once here so the launch hot path
         # reads a single attribute instead of recomputing it per call.
         self.cluster_dim = cluster_dim
+
+        # Whether launches use cuLaunchCooperativeKernel (@wp.kernel(cooperative=True)),
+        # so that every block is resident and wp.grid_sync() can synchronize them.
+        self.cooperative = cooperative
 
         # Launch metadata for this module variant; kernel.adj.det_meta is
         # codegen scratch and may describe a different variant.
@@ -1948,6 +1953,7 @@ def kernel(
     module_options: dict[str, Any] | None = None,
     entry_point_abi: Literal["warp", "external_constant_params"] | None = None,
     grid_stride: bool | None = None,
+    cooperative: bool | None = None,
 ):
     """
     Decorator to register a Warp kernel from a Python function.
@@ -2068,6 +2074,12 @@ def kernel(
             capped: launching it with ``max_blocks > 0`` raises. ``None``
             defers to the ``"default_grid_stride"`` module option, then
             :data:`warp.config.default_grid_stride`.
+        cooperative: Whether to launch the kernel as a CUDA cooperative launch, in
+            which every block of the grid is resident on the device at once so that
+            blocks can synchronize with :func:`warp.grid_sync`. Requires
+            ``grid_stride=False`` and no ``cluster_dim``, and is supported on CUDA
+            devices only. The launch fails if the grid exceeds
+            :func:`warp.get_cuda_max_cooperative_blocks`.
 
     Returns:
         The registered kernel.
@@ -2115,6 +2127,18 @@ def kernel(
 
         if cluster_dim is not None:
             kernel_options["cluster_dim"] = _normalize_cluster_dim(cluster_dim)
+
+        if cooperative:
+            if grid_stride is not False:
+                raise ValueError(
+                    f"@wp.kernel for '{f.__name__}': cooperative=True requires grid_stride=False, so that "
+                    "the launch grid has one thread per launch index"
+                )
+            if kernel_options.get("cluster_dim", 1) != 1:
+                raise ValueError(
+                    f"@wp.kernel for '{f.__name__}': cooperative=True does not support thread block clusters"
+                )
+            kernel_options["cooperative"] = True
 
         # Resolve the module for this kernel
         if module is None:
@@ -3366,6 +3390,9 @@ class ModuleBuilder:
         # propagate used_by_backward_kernel now that the full call graph is known
         self._propagate_used_by_backward_kernel()
 
+        # reject wp.grid_sync() reached from kernels that are not launched cooperatively
+        self._validate_grid_sync()
+
         # propagate callee replay/reverse shared-memory needs into backward-kernel sizing
         self._propagate_backward_shared_memory()
 
@@ -3524,6 +3551,27 @@ class ModuleBuilder:
                     "kernel. Use enable_backward=False on the kernel, or switch to @wp.func_native "
                     "with adj_snippet for a manually written adjoint."
                 )
+
+    def _validate_grid_sync(self):
+        # a grid barrier deadlocks unless every block of the grid is resident, which only a
+        # cooperative launch guarantees, so wp.grid_sync() requires a cooperative kernel
+        for kernel in self.kernels:
+            if (self.options | kernel.options).get("cooperative", False):
+                continue
+            visited = set()
+            worklist = [kernel.adj]
+            while worklist:
+                adj = worklist.pop()
+                if adj.uses_grid_sync:
+                    scope = f"function '{adj.fun_name}' called from " if adj is not kernel.adj else ""
+                    raise WarpCodegenError(
+                        f"In {scope}kernel '{kernel.key}': wp.grid_sync() requires a cooperative kernel; "
+                        "declare it with @wp.kernel(cooperative=True)"
+                    )
+                for callee in adj.called_user_functions:
+                    if callee not in visited:
+                        visited.add(callee)
+                        worklist.append(callee.adj)
 
     def _propagate_backward_shared_memory(self):
         # a backward call site replays the callee's forward, then calls its reverse; the two frames
@@ -3967,12 +4015,18 @@ class ModuleExec:
                 forward_smem_bytes,
                 backward_smem_bytes,
                 cluster_dim=effective_cluster_dim,
+                cooperative=options.get("cooperative", False),
                 det_launch_meta=self.det_launch_meta_map.get(name),
                 forward_smem_shortfall=forward_smem_shortfall,
                 backward_smem_shortfall=backward_smem_shortfall,
             )
 
         else:
+            if options.get("cooperative", False):
+                raise RuntimeError(
+                    f"Kernel '{kernel.key}' is declared with cooperative=True, which is supported on CUDA devices only"
+                )
+
             func = ctypes.CFUNCTYPE(None)
             forward = (
                 func(runtime.llvm.wp_lookup(self.handle.encode("utf-8"), (name + "_cpu_forward").encode("utf-8")))
@@ -8258,6 +8312,14 @@ class Runtime:
             ]
             self.core.wp_cuda_get_max_cluster_dim.restype = ctypes.c_int
 
+            self.core.wp_cuda_get_max_cooperative_blocks.argtypes = [
+                ctypes.c_void_p,  # context
+                ctypes.c_void_p,  # kernel (CUfunction)
+                ctypes.c_int,  # block_dim
+                ctypes.c_int,  # dynamic_smem_bytes
+            ]
+            self.core.wp_cuda_get_max_cooperative_blocks.restype = ctypes.c_int
+
             self.core.wp_cuda_get_suggested_block_size.argtypes = [
                 ctypes.c_void_p,
                 ctypes.c_void_p,
@@ -8275,6 +8337,7 @@ class Runtime:
                 ctypes.c_int,  # block_dim
                 ctypes.c_int,  # grid_stride (1 = grid-stride loop kernel, 0 = lean 3D kernel)
                 ctypes.c_int,  # cluster_dim
+                ctypes.c_int,  # cooperative
                 ctypes.c_int,  # shared_memory_bytes
                 ctypes.POINTER(ctypes.c_void_p),
                 ctypes.c_void_p,
@@ -9203,6 +9266,60 @@ def get_cuda_max_cluster_dim(
         return int(
             runtime.core.wp_cuda_get_max_cluster_dim(
                 device.context, forward_handle, int(block_dim), int(dynamic_smem_bytes)
+            )
+        )
+    finally:
+        kernel.module.options["block_dim"] = prior_block_dim
+
+
+def get_cuda_max_cooperative_blocks(
+    kernel,
+    device: DeviceLike = None,
+    *,
+    block_dim: int | None = None,
+) -> int:
+    """Return the maximum number of blocks a cooperative launch of *kernel* accepts on *device*.
+
+    A cooperative launch (``@wp.kernel(cooperative=True)``) requires every block of the
+    grid to be resident on the device at once. This is the occupancy limit per streaming
+    multiprocessor, reported by ``cuOccupancyMaxActiveBlocksPerMultiprocessor`` for the
+    kernel's registers and the shared memory Warp configures for it, times the number of
+    multiprocessors.
+
+    Args:
+        kernel: A ``@wp.kernel(cooperative=True)``-decorated kernel instance.
+        device: Target device. Defaults to the current device.
+        block_dim: Threads per block at launch. If ``None``, uses the kernel's
+            module-resolved ``block_dim``.
+
+    Returns:
+        The maximum number of blocks, or ``0`` on non-CUDA devices and on driver error.
+    """
+    init()
+
+    device = runtime.get_device(device)
+    if not device.is_cuda:
+        return 0
+
+    if block_dim is None:
+        block_dim = kernel.module.options.get("block_dim", 256)
+
+    # ``Module.load(device, block_dim)`` mutates ``module.options["block_dim"]``
+    # as a side effect.  Snapshot and restore so this query helper has no
+    # observable effect on subsequent launches that don't pass ``block_dim``.
+    prior_block_dim = kernel.module.options["block_dim"]
+    try:
+        module_exec = kernel.module.load(device, block_dim)
+        if module_exec is None:
+            return 0
+
+        hooks = module_exec.get_kernel_hooks(kernel)
+        if not hooks.forward:
+            return 0
+
+        return int(
+            runtime.core.wp_cuda_get_max_cooperative_blocks(
+                device.context, hooks.forward, int(block_dim), int(hooks.forward_smem_bytes)
             )
         )
     finally:
@@ -11344,6 +11461,7 @@ class Launch:
                     self.block_dim,
                     int(self.grid_stride),
                     self.cluster_dim,
+                    int(self.hooks.cooperative),
                     self.hooks.backward_smem_bytes,
                     self.params_addr,
                     stream.cuda_stream,
@@ -11359,6 +11477,7 @@ class Launch:
                     self.block_dim,
                     int(self.grid_stride),
                     self.cluster_dim,
+                    int(self.hooks.cooperative),
                     self.hooks.forward_smem_bytes,
                     self.params_addr,
                     stream.cuda_stream,
@@ -11897,6 +12016,7 @@ def launch(
                         block_dim,
                         int(kernel.grid_stride),
                         cluster_dim,
+                        int(hooks.cooperative),
                         hooks.backward_smem_bytes,
                         kernel_params,
                         stream.cuda_stream,
@@ -11945,6 +12065,7 @@ def launch(
                         block_dim,
                         int(kernel.grid_stride),
                         cluster_dim,
+                        int(hooks.cooperative),
                         hooks.forward_smem_bytes,
                         kernel_params,
                         stream.cuda_stream,
