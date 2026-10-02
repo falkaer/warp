@@ -1,0 +1,95 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Build a manylinux_2_28 x86_64 CUDA 13 wheel for a fork and attach it to a
+# GitHub release named after the pushed tag. Mirrors the GitLab
+# "linux-x86_64 cu13 build" job and the Linux wheel packaging step, using the
+# warp-builder image built locally from docker/warp-builder.
+
+name: Fork Linux Wheel
+
+on:
+  push:
+    tags:
+      - fork-*
+
+env:
+  UV_IMAGE: ghcr.io/astral-sh/uv:0.12.13@sha256:b485bd65cc2cf1c9a93b3554012c9c3778cf7b1b5fd3d3096ce9e1226c97e1e6
+  UV_VERSION: "0.12.13"
+  MANYLINUX_IMAGE: quay.io/pypa/manylinux_2_28_x86_64@sha256:53390351aeb4688114b02c36a23b3e6ce1166ee9b7afc5df1a4f776354fc764c
+  IMAGE: warp-builder:manylinux_2_28-cuda13.4.2-x86_64
+
+jobs:
+  build-wheel:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+          lfs: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e  # v4.3.0
+
+      - name: Install uv for host-side setup
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      - name: Set up host Python
+        run: uv python install
+
+      - name: Set up CUDA Toolkit 13.4.2
+        id: cuda13
+        uses: ./.github/actions/setup-warp-cuda
+        with:
+          version: "13.4.2"
+          platform: linux-x86_64
+          cache-read: "true"
+          cache-write: "true"
+
+      - name: Build CUDA Toolkit 13.4.2 builder image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7.3.0
+        with:
+          context: docker/warp-builder
+          file: docker/warp-builder/Dockerfile
+          platforms: linux/amd64
+          build-contexts: |
+            cuda_toolkit=${{ steps.cuda13.outputs.cuda-path }}
+          build-args: |
+            CUDA_VERSION=13.4.2
+            MANYLINUX_IMAGE=${{ env.MANYLINUX_IMAGE }}
+            MANYLINUX_POLICY=manylinux_2_28
+            TARGETARCH=x86_64
+            UV_IMAGE=${{ env.UV_IMAGE }}
+            UV_VERSION=${{ env.UV_VERSION }}
+          load: true
+          tags: ${{ env.IMAGE }}
+
+      - name: Build Warp and the wheel
+        run: |
+          docker run --rm \
+            --volume "${GITHUB_WORKSPACE}:/workspace" \
+            --env WARP_CACHE_PATH=/tmp/warp-cache \
+            "${IMAGE}" \
+            bash -euxo pipefail -c '
+              uv run --no-python-downloads --python 3.12 build_lib.py --cuda-path=/opt/cuda
+              mkdir -p warp/bin/linux-x86_64
+              mv warp/bin/warp.so warp/bin/linux-x86_64
+              mv warp/bin/warp-clang.so warp/bin/linux-x86_64
+              uv build --no-python-downloads --python 3.12 --wheel --out-dir dist \
+                -C--build-option=-Plinux-x86_64 -C--build-option=-Mmanylinux_2_28
+            '
+          ls -la dist
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/*.whl \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "${GITHUB_REF_NAME}" \
+            --notes "Linux x86_64 CUDA 13 wheel built from ${GITHUB_SHA}."
