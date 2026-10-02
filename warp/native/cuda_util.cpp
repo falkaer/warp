@@ -112,6 +112,8 @@ static PFN_cuModuleLoadDataEx_v2010 pfn_cuModuleLoadDataEx;
 static PFN_cuModuleUnload_v2000 pfn_cuModuleUnload;
 static PFN_cuModuleGetFunction_v2000 pfn_cuModuleGetFunction;
 static PFN_cuLaunchKernel_v4000 pfn_cuLaunchKernel;
+static PFN_cuLaunchCooperativeKernel_v9000 pfn_cuLaunchCooperativeKernel;
+static PFN_cuOccupancyMaxActiveBlocksPerMultiprocessor_v6050 pfn_cuOccupancyMaxActiveBlocksPerMultiprocessor;
 static PFN_cuOccupancyMaxPotentialBlockSize_v6050 pfn_cuOccupancyMaxPotentialBlockSize;
 static PFN_cuOccupancyMaxActiveClusters_v11070 pfn_cuOccupancyMaxActiveClusters;
 static PFN_cuMemcpyPeerAsync_v4000 pfn_cuMemcpyPeerAsync;
@@ -288,6 +290,10 @@ bool init_cuda_driver()
     get_driver_entry_point("cuModuleUnload", 2000, &(void*&)pfn_cuModuleUnload);
     get_driver_entry_point("cuModuleGetFunction", 2000, &(void*&)pfn_cuModuleGetFunction);
     get_driver_entry_point("cuLaunchKernel", 4000, &(void*&)pfn_cuLaunchKernel);
+    get_driver_entry_point("cuLaunchCooperativeKernel", 9000, &(void*&)pfn_cuLaunchCooperativeKernel);
+    get_driver_entry_point(
+        "cuOccupancyMaxActiveBlocksPerMultiprocessor", 6050, &(void*&)pfn_cuOccupancyMaxActiveBlocksPerMultiprocessor
+    );
     get_driver_entry_point("cuOccupancyMaxPotentialBlockSize", 6050, &(void*&)pfn_cuOccupancyMaxPotentialBlockSize);
     get_driver_entry_point("cuOccupancyMaxActiveClusters", 11070, &(void*&)pfn_cuOccupancyMaxActiveClusters);
     get_driver_entry_point("cuMemcpyPeerAsync", 4000, &(void*&)pfn_cuMemcpyPeerAsync);
@@ -887,6 +893,34 @@ CUresult cuLaunchKernel_f(
                                     hStream, kernelParams, extra
                                 )
                               : DRIVER_ENTRY_POINT_ERROR;
+}
+
+CUresult cuLaunchCooperativeKernel_f(
+    CUfunction f,
+    unsigned int gridDimX,
+    unsigned int gridDimY,
+    unsigned int gridDimZ,
+    unsigned int blockDimX,
+    unsigned int blockDimY,
+    unsigned int blockDimZ,
+    unsigned int sharedMemBytes,
+    CUstream hStream,
+    void** kernelParams
+)
+{
+    return pfn_cuLaunchCooperativeKernel
+        ? pfn_cuLaunchCooperativeKernel(
+              f, gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY, blockDimZ, sharedMemBytes, hStream, kernelParams
+          )
+        : DRIVER_ENTRY_POINT_ERROR;
+}
+
+CUresult
+cuOccupancyMaxActiveBlocksPerMultiprocessor_f(int* numBlocks, CUfunction func, int blockSize, size_t dynamicSMemSize)
+{
+    return pfn_cuOccupancyMaxActiveBlocksPerMultiprocessor
+        ? pfn_cuOccupancyMaxActiveBlocksPerMultiprocessor(numBlocks, func, blockSize, dynamicSMemSize)
+        : DRIVER_ENTRY_POINT_ERROR;
 }
 
 CUresult cuOccupancyMaxPotentialBlockSize_f(

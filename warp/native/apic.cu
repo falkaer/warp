@@ -448,7 +448,8 @@ static bool apic_replay_ops_into_cuda_capture(
             // the recording branch in wp_cuda_launch_kernel is a no-op.
             size_t launch_res = wp_cuda_launch_kernel(
                 graph->cuda_context, kernel, rec->dim, rec->max_blocks, rec->block_dim, rec->grid_stride,
-                rec->cluster_dim > 0 ? rec->cluster_dim : 1, rec->smem_bytes, args.data(), stream, /*apic_info=*/nullptr
+                rec->cluster_dim > 0 ? rec->cluster_dim : 1, rec->cooperative, rec->smem_bytes, args.data(), stream,
+                /*apic_info=*/nullptr
             );
             if (launch_res != CUDA_SUCCESS)
                 success = false;

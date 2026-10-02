@@ -2493,6 +2493,7 @@ def launch_deterministic(
             block_dim,
             int(kernel.grid_stride),
             hooks.cluster_dim,
+            int(hooks.cooperative),
             shared_memory_bytes,
             _build_cuda_kernel_params(params_list),
             stream.cuda_stream,

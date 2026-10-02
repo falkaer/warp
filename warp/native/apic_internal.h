@@ -309,6 +309,7 @@ void apic_record_kernel_launch(
     int block_dim,
     int grid_stride,
     int cluster_dim,
+    int cooperative,
     int smem_bytes,
     const APICLaunchParamRecord* params,
     int num_params,

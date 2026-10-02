@@ -604,6 +604,7 @@ class FfiKernel:
                     block_dim,
                     int(self.kernel.grid_stride),
                     hooks.cluster_dim,
+                    int(hooks.cooperative),
                     hooks.forward_smem_bytes,
                     kernel_params,
                     stream,

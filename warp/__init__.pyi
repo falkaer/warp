@@ -161,6 +161,7 @@ from warp._src.utils import ScopedMempool as ScopedMempool
 from warp._src.utils import ScopedMempoolAccess as ScopedMempoolAccess
 from warp._src.utils import ScopedPeerAccess as ScopedPeerAccess
 from warp._src.context import get_cuda_max_cluster_dim as get_cuda_max_cluster_dim
+from warp._src.context import get_cuda_max_cooperative_blocks as get_cuda_max_cooperative_blocks
 from warp._src.context import is_mempool_supported as is_mempool_supported
 from warp._src.context import is_mempool_enabled as is_mempool_enabled
 from warp._src.context import set_mempool_enabled as set_mempool_enabled
@@ -9810,6 +9811,19 @@ def tid() -> int | tuple[int, int] | tuple[int, int, int] | tuple[int, int, int,
 
 def block_dim() -> int:
     """Query the number of threads in the current block."""
+    ...
+
+def grid_sync() -> None:
+    """Synchronize all threads of all blocks in the launch grid.
+
+    Every thread of the grid must call this function, and none returns until all have
+    arrived; writes to global memory made before the call are visible to every thread
+    after it. This is the equivalent of CUDA's ``cooperative_groups::this_grid().sync()``.
+
+    Only kernels declared with ``@wp.kernel(cooperative=True)`` may call this function,
+    because a grid barrier requires every block to be resident on the device at once.
+    Size the launch with :func:`warp.get_cuda_max_cooperative_blocks`. Cooperative
+    kernels are supported on CUDA devices only."""
     ...
 
 @over

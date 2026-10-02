@@ -2258,6 +2258,9 @@ class Adjoint:
         # Exact launch metadata derived from calls reached by this build.
         adj.uses_tid = False
 
+        # Whether this build calls wp.grid_sync(); ModuleBuilder rejects it outside cooperative kernels.
+        adj.uses_grid_sync = False
+
         # wp.ref[T] callees lacking a manual adjoint; rejected post-build, once used_by_backward_kernel is final
         adj.unvalidated_ref_calls = []
 
@@ -4565,6 +4568,8 @@ class Adjoint:
 
         if func is warp._src.context.builtin_functions["tid"]:
             adj.uses_tid = True
+        elif func is warp._src.context.builtin_functions["grid_sync"]:
+            adj.uses_grid_sync = True
 
         # Evaluate positional arguments.
         args = []

@@ -354,6 +354,7 @@ void apic_record_kernel_launch(
     int block_dim,
     int grid_stride,
     int cluster_dim,
+    int cooperative,
     int smem_bytes,
     const APICLaunchParamRecord* params,
     int num_params,
@@ -393,6 +394,7 @@ void apic_record_kernel_launch(
     rec.smem_bytes = smem_bytes;
     rec.is_forward = is_forward ? 1 : 0;
     rec.cluster_dim = cluster_dim > 0 ? static_cast<uint8_t>(cluster_dim) : 1;
+    rec.cooperative = cooperative ? 1 : 0;
     rec.kernel_key_len = static_cast<uint16_t>(key_len);
     rec.module_hash_len = static_cast<uint16_t>(hash_len);
     rec.num_params = static_cast<uint16_t>(num_params);

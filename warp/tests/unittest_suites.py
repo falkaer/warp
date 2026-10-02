@@ -100,6 +100,7 @@ def default_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader)
     from warp.tests.cuda.test_capture_mode import TestCaptureMode
     from warp.tests.cuda.test_clang_cuda import TestClangCUDA
     from warp.tests.cuda.test_cluster_dim import TestClusterDim
+    from warp.tests.cuda.test_cooperative import TestCooperative
     from warp.tests.cuda.test_cuda_arch_suffix import TestCudaArchSuffix
     from warp.tests.cuda.test_cuda_max_registers import TestCudaMaxRegisters
     from warp.tests.cuda.test_cuda_smem_spilling import TestCudaSmemSpilling
@@ -337,6 +338,7 @@ def default_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader)
         TestConditional,
         TestConstantPrecision,
         TestContext,
+        TestCooperative,
         TestCopy,
         TestCoreLibraryBinary,
         TestCpuBlockCodegen,
@@ -558,6 +560,7 @@ def debug_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader):
     from warp.tests.cuda.test_clang_cuda import TestClangCUDA
     from warp.tests.cuda.test_cluster_dim import TestClusterDim
     from warp.tests.cuda.test_conditional_captures import TestConditionalCaptures
+    from warp.tests.cuda.test_cooperative import TestCooperative
     from warp.tests.cuda.test_cuda_arch_suffix import TestCudaArchSuffix
     from warp.tests.cuda.test_ipc import TestIpc
     from warp.tests.cuda.test_mempool import TestMempool
@@ -840,6 +843,7 @@ def debug_suite(test_loader: unittest.TestLoader = unittest.defaultTestLoader):
         TestClangCUDA,
         TestClusterDim,
         TestConditionalCaptures,
+        TestCooperative,
         TestCudaArchSuffix,
         TestIpc,
         TestMempool,
